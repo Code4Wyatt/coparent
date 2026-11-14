@@ -1,0 +1,18 @@
+{
+  "name": "coparent",
+  "private": true,
+  "packageManager": "pnpm@11.28.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "check-types": "turbo run check-types",
+    "clean": "turbo run clean",
+    "synth": "pnpm --filter @coparent/backend synth",
+    "deploy": "pnpm --filter @coparent/backend deploy"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0"
+  }
+}
