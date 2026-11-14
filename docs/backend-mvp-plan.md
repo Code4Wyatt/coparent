@@ -106,7 +106,9 @@ consent, and retention are auditable.
 - Enforce entitlement checks in each paid feature handler, not only in clients.
 - Start each new family on a basic plan; opt-in features are disabled unless
   the family entitlement record enables them.
-- Add an idempotent billing-event ingestion boundary that updates entitlements.
+- Add a normalized SQS billing-event boundary. Apply revisions conditionally,
+  deduplicate event IDs, and send poison events to a dead-letter queue. The
+  provider-specific webhook adapter remains open until a provider is selected.
 - Keep the payment provider behind an adapter until web, Apple, and Google
   billing requirements and the initial price catalog are selected.
 
@@ -117,10 +119,12 @@ paid capabilities cannot be enabled by changing client requests.
 
 - Register and revoke device push tokens; route message, calendar, and call
   invitation notifications through a provider adapter.
-- Use DynamoDB Streams for post-write notifications; keep delivery retries
-  separate from the user-facing API response.
-- Add API throttling, structured request IDs, metrics and alarms, dead-letter
-  handling for asynchronous work, and retention/lifecycle policies.
+- Use DynamoDB Streams to forward outbox records to a notification queue; keep
+  delivery retries separate from the user-facing API response. Add the selected
+  push provider consumer and device-token routes after provider selection.
+- Configure API stage throttles, access logs, tracing, and alarms for billing and
+  notification dead-letter queues.
+- Add retention/lifecycle policies and structured metrics for asynchronous work.
 - Add per-environment outputs and deployment configuration. Use least-privilege
   Lambda roles and keep secrets in AWS-managed secret/configuration storage.
 

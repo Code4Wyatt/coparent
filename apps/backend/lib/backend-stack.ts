@@ -6,8 +6,9 @@ import {
   Stack,
   StackProps,
 } from "aws-cdk-lib";
-import { Runtime } from "aws-cdk-lib/aws-lambda";
+import { Runtime, StartingPosition } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import { DynamoEventSource, SqsDlq, SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import {
   CognitoUserPoolsAuthorizer,
   AccessLogFormat,
@@ -20,7 +21,9 @@ import { AttributeType, BillingMode, ProjectionType, StreamViewType, Table } fro
 import { UserPool, UserPoolClient, VerificationEmailStyle } from "aws-cdk-lib/aws-cognito";
 import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { Alarm, ComparisonOperator, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
+import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import { Construct } from "constructs";
 
 interface BackendStackProps extends StackProps {
@@ -91,6 +94,10 @@ export class BackendStack extends Stack {
       stageName: props.stage,
       accessLogDestination: new LogGroupLogDestination(apiAccessLogs),
       accessLogFormat: AccessLogFormat.jsonWithStandardFields(),
+      metricsEnabled: true,
+      tracingEnabled: true,
+      throttlingBurstLimit: 100,
+      throttlingRateLimit: 50,
     };
 
     const api = new RestApi(this, "CoparentRestApi", {
@@ -275,6 +282,93 @@ export class BackendStack extends Stack {
     call.addResource("end").addMethod("POST", callIntegration, familyAuthorizer);
     call.addResource("recording").addMethod("GET", callIntegration, familyAuthorizer);
 
+    const billingDeadLetterQueue = new Queue(this, "BillingEventsDeadLetterQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(14),
+    });
+    const billingEventsQueue = new Queue(this, "BillingEventsQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      visibilityTimeout: Duration.seconds(120),
+      deadLetterQueue: { queue: billingDeadLetterQueue, maxReceiveCount: 5 },
+    });
+    new Alarm(this, "BillingEventsDeadLetterAlarm", {
+      metric: billingDeadLetterQueue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    const billingHandler = new NodejsFunction(this, "BillingEventHandler", {
+      entry: join(__dirname, "../src/features/billing/handler.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(20),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: { DATA_TABLE_NAME: dataTable.tableName },
+    });
+    dataTable.grantReadWriteData(billingHandler);
+    billingHandler.addEventSource(new SqsEventSource(billingEventsQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    const notificationStreamFailureQueue = new Queue(this, "NotificationStreamFailureQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(14),
+    });
+    const notificationDeliveryDeadLetterQueue = new Queue(this, "NotificationDeliveryDeadLetterQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(14),
+    });
+    const notificationQueue = new Queue(this, "NotificationDispatchQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      visibilityTimeout: Duration.seconds(120),
+      deadLetterQueue: { queue: notificationDeliveryDeadLetterQueue, maxReceiveCount: 5 },
+    });
+    new Alarm(this, "NotificationStreamFailureAlarm", {
+      metric: notificationStreamFailureQueue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    new Alarm(this, "NotificationDeliveryFailureAlarm", {
+      metric: notificationDeliveryDeadLetterQueue.metricApproximateNumberOfMessagesVisible({ period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    const outboxDispatcher = new NodejsFunction(this, "NotificationOutboxDispatcher", {
+      entry: join(__dirname, "../src/features/notifications/outbox-dispatcher.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(20),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: {
+        DATA_TABLE_NAME: dataTable.tableName,
+        NOTIFICATION_QUEUE_URL: notificationQueue.queueUrl,
+      },
+    });
+    dataTable.grantReadWriteData(outboxDispatcher);
+    notificationQueue.grantSendMessages(outboxDispatcher);
+    outboxDispatcher.addEventSource(new DynamoEventSource(dataTable, {
+      startingPosition: StartingPosition.TRIM_HORIZON,
+      batchSize: 50,
+      bisectBatchOnError: true,
+      retryAttempts: 3,
+      reportBatchItemFailures: true,
+      onFailure: new SqsDlq(notificationStreamFailureQueue),
+      filters: [{
+        eventName: ["INSERT"],
+        dynamodb: { NewImage: { entityType: { S: ["NOTIFICATION_OUTBOX"] } } },
+      }],
+    }));
+
     new CfnOutput(this, "ApiUrl", {
       value: api.url,
       description: "Base URL for the Coparent REST API",
@@ -283,5 +377,7 @@ export class BackendStack extends Stack {
     new CfnOutput(this, "UserPoolId", { value: userPool.userPoolId });
     new CfnOutput(this, "UserPoolClientId", { value: userPoolClient.userPoolClientId });
     new CfnOutput(this, "DataTableName", { value: dataTable.tableName });
+    new CfnOutput(this, "BillingEventsQueueUrl", { value: billingEventsQueue.queueUrl });
+    new CfnOutput(this, "NotificationDispatchQueueUrl", { value: notificationQueue.queueUrl });
   }
 }

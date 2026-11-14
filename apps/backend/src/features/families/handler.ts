@@ -119,7 +119,7 @@ async function createFamily(event: Parameters<Parameters<typeof createHandler>[0
             familyId,
             plan: "basic",
             enabledFeatures: [],
-            version: 1,
+            revision: 0,
             updatedAt: now,
           },
           ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",

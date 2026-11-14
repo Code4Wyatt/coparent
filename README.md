@@ -18,6 +18,8 @@ Protected routes use a Cognito access token in the `Authorization: Bearer <token
 
 Call invitations expire after five minutes. A media meeting and attendee join credentials are created only after acceptance. Recording requires the caller to request it, the invitee to consent, and the family to have the `call_recording` entitlement. New families start on the `basic` plan with no opt-in features enabled. The invitation notification is written to a DynamoDB outbox; push delivery is part of the notifications stage and is not wired yet.
 
+Entitlement changes use a normalized SQS event contract with per-family revisions and idempotency keys. The provider-specific billing webhook adapter is not selected yet. DynamoDB outbox inserts are forwarded to a FIFO notification queue; a push provider consumer and device-token registration still need to be added.
+
 ## Requirements
 
 - Node.js 22 or newer
