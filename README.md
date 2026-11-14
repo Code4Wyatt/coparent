@@ -33,9 +33,11 @@ pnpm install
 pnpm build
 pnpm check-types
 pnpm synth
-pnpm deploy
+pnpm deploy:dev
+pnpm deploy:staging
+pnpm deploy:production
 ```
 
-`pnpm synth` creates a CloudFormation template without deploying. Set the CDK context `stage` to choose a stack stage, for example `pnpm deploy -- --context stage=dev`.
+`pnpm synth` creates CloudFormation templates for `CoparentBackend-dev`, `CoparentBackend-staging`, and `CoparentBackend-production`, plus the account-level `CoparentSharedServices` stack. Each backend stack can be deployed independently; the matching deploy command also deploys the shared stack dependency when needed. `pnpm deploy` targets development only.
 
 The AWS account and region are read from the active AWS credentials/configuration. Deploying for the first time in an AWS environment may require `pnpm --filter @coparent/backend bootstrap`.

@@ -18,7 +18,7 @@ import {
 } from "aws-cdk-lib/aws-apigateway";
 import { AttributeType, BillingMode, ProjectionType, StreamViewType, Table } from "aws-cdk-lib/aws-dynamodb";
 import { UserPool, UserPoolClient, VerificationEmailStyle } from "aws-cdk-lib/aws-cognito";
-import { CfnServiceLinkedRole, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
@@ -236,10 +236,6 @@ export class BackendStack extends Stack {
         ArnLike: { "aws:SourceArn": `arn:${this.partition}:chime:*:${this.account}:*` },
       },
     }));
-    new CfnServiceLinkedRole(this, "ChimeMediaPipelinesServiceLinkedRole", {
-      awsServiceName: "mediapipelines.chime.amazonaws.com",
-    });
-
     const callHandler = new NodejsFunction(this, "CallHandler", {
       entry: join(__dirname, "../src/features/calls/handler.ts"),
       handler: "handler",

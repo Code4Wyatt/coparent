@@ -10,7 +10,10 @@
     "check-types": "turbo run check-types",
     "clean": "turbo run clean",
     "synth": "pnpm --filter @coparent/backend synth",
-    "deploy": "pnpm --filter @coparent/backend deploy"
+    "deploy": "pnpm --filter @coparent/backend deploy:dev",
+    "deploy:dev": "pnpm --filter @coparent/backend deploy:dev",
+    "deploy:staging": "pnpm --filter @coparent/backend deploy:staging",
+    "deploy:production": "pnpm --filter @coparent/backend deploy:production"
   },
   "devDependencies": {
     "turbo": "^2.5.0"

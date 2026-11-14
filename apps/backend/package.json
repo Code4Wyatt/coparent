@@ -8,7 +8,9 @@
     "clean": "rm -rf dist cdk.out",
     "bootstrap": "cdk bootstrap",
     "synth": "cdk synth",
-    "deploy": "cdk deploy"
+    "deploy:dev": "cdk deploy CoparentBackend-dev",
+    "deploy:staging": "cdk deploy CoparentBackend-staging",
+    "deploy:production": "cdk deploy CoparentBackend-production"
   },
   "dependencies": {
     "@aws-sdk/client-chime-sdk-media-pipelines": "^3.1168.0",
