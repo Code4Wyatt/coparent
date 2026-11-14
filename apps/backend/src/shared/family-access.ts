@@ -1,4 +1,4 @@
-import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { HttpError } from "./http";
 import { documentClient, getTableName } from "./dynamo";
 
@@ -10,4 +10,16 @@ export async function requireFamilyMember(userId: string, familyId: string): Pro
   }));
 
   if (!result.Item) throw new HttpError(404, "family_not_found", "The family was not found.");
+}
+
+export async function getOtherFamilyMemberIds(userId: string, familyId: string): Promise<string[]> {
+  const result = await documentClient.send(new QueryCommand({
+    TableName: getTableName(),
+    KeyConditionExpression: "PK = :family AND begins_with(SK, :memberPrefix)",
+    ExpressionAttributeValues: { ":family": `FAMILY#${familyId}`, ":memberPrefix": "MEMBER#" },
+    ConsistentRead: true,
+  }));
+  return (result.Items ?? [])
+    .map((member) => String(member.userId))
+    .filter((memberId) => memberId && memberId !== userId);
 }

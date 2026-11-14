@@ -17,7 +17,8 @@ import {
   parseBody,
   publicRecord,
 } from "../../shared/http";
-import { requireFamilyMember } from "../../shared/family-access";
+import { getOtherFamilyMemberIds, requireFamilyMember } from "../../shared/family-access";
+import { notificationOutboxPut } from "../../shared/notification-outbox";
 
 const comprehend = new ComprehendClient({});
 const messageSchema = z.object({
@@ -195,6 +196,7 @@ async function sendMessage(event: Parameters<Parameters<typeof createHandler>[0]
   }
 
   try {
+    const recipients = await getOtherFamilyMemberIds(user.userId, familyId);
     await documentClient.send(new TransactWriteCommand({
       TransactItems: [
         {
@@ -205,6 +207,13 @@ async function sendMessage(event: Parameters<Parameters<typeof createHandler>[0]
           },
         },
         auditPut(familyId, user.userId, "MESSAGE_SENT", createdAt, { messageId }),
+        ...recipients.map((recipientId) => notificationOutboxPut(
+          familyId,
+          recipientId,
+          "MESSAGE_CREATED",
+          messageId,
+          createdAt,
+        )),
       ],
     }));
   } catch (error) {

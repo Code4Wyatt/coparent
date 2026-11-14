@@ -11,7 +11,8 @@ import {
   parseBody,
   publicRecord,
 } from "../../shared/http";
-import { requireFamilyMember } from "../../shared/family-access";
+import { getOtherFamilyMemberIds, requireFamilyMember } from "../../shared/family-access";
+import { notificationOutboxPut } from "../../shared/notification-outbox";
 
 const dateTimeSchema = z.string().refine((value) =>
   Number.isFinite(Date.parse(value)) && /(?:Z|[+-]\d{2}:\d{2})$/i.test(value),
@@ -188,6 +189,7 @@ async function createEvent(event: APIGatewayProxyEvent) {
     createdAt,
     updatedAt: createdAt,
   };
+  const recipients = await getOtherFamilyMemberIds(user.userId, familyId);
 
   await documentClient.send(new TransactWriteCommand({
     TransactItems: [
@@ -200,6 +202,13 @@ async function createEvent(event: APIGatewayProxyEvent) {
       },
       eventRevisionPut(familyId, item, 1, user.userId, createdAt),
       auditPut(familyId, user.userId, "CALENDAR_EVENT_CREATED", createdAt, { eventId }),
+      ...recipients.map((recipientId) => notificationOutboxPut(
+        familyId,
+        recipientId,
+        "CALENDAR_EVENT_CREATED",
+        eventId,
+        createdAt,
+      )),
     ],
   }));
 
@@ -345,6 +354,7 @@ async function createProposal(event: APIGatewayProxyEvent) {
     GSI2PK: `FAMILY#${familyId}#PROPOSALS`,
     GSI2SK: `PENDING#${createdAt}#${proposalId}`,
   };
+  const recipients = await getOtherFamilyMemberIds(user.userId, familyId);
 
   await documentClient.send(new TransactWriteCommand({
     TransactItems: [
@@ -356,6 +366,13 @@ async function createProposal(event: APIGatewayProxyEvent) {
         },
       },
       auditPut(familyId, user.userId, "CALENDAR_CHANGE_PROPOSED", createdAt, { proposalId, eventId: eventId ?? "" }),
+      ...recipients.map((recipientId) => notificationOutboxPut(
+        familyId,
+        recipientId,
+        "CALENDAR_PROPOSAL_CREATED",
+        proposalId,
+        createdAt,
+      )),
     ],
   }));
 
@@ -517,6 +534,13 @@ async function respondToProposal(event: APIGatewayProxyEvent) {
     respondedAt,
     { proposalId, eventId: String(proposal.eventId ?? "") },
   ));
+  eventItems.push(notificationOutboxPut(
+    familyId,
+    String(proposal.proposedBy),
+    "CALENDAR_PROPOSAL_RESPONDED",
+    proposalId,
+    respondedAt,
+  ));
 
   try {
     await documentClient.send(new TransactWriteCommand({ TransactItems: eventItems }));
@@ -558,6 +582,7 @@ async function withdrawProposal(event: APIGatewayProxyEvent) {
   }
 
   const withdrawnAt = new Date().toISOString();
+  const recipients = await getOtherFamilyMemberIds(user.userId, familyId);
   try {
     await documentClient.send(new TransactWriteCommand({
       TransactItems: [
@@ -581,6 +606,13 @@ async function withdrawProposal(event: APIGatewayProxyEvent) {
           proposalId,
           eventId: String(proposal.eventId ?? ""),
         }),
+        ...recipients.map((recipientId) => notificationOutboxPut(
+          familyId,
+          recipientId,
+          "CALENDAR_PROPOSAL_WITHDRAWN",
+          proposalId,
+          withdrawnAt,
+        )),
       ],
     }));
   } catch (error) {
