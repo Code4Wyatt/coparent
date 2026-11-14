@@ -1,25 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  ChimeSDKMeetingsClient,
-  CreateAttendeeCommand,
-  CreateMeetingCommand,
-  DeleteMeetingCommand,
-  GetAttendeeCommand,
-} from "@aws-sdk/client-chime-sdk-meetings";
-import {
-  ChimeSDKMediaPipelinesClient,
-  CreateMediaCapturePipelineCommand,
-  CreateMediaConcatenationPipelineCommand,
-  DeleteMediaCapturePipelineCommand,
-  GetMediaPipelineCommand,
-} from "@aws-sdk/client-chime-sdk-media-pipelines";
-import {
-  GetObjectCommand,
-  ListObjectsV2Command,
-  S3Client,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import {
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -39,14 +19,11 @@ import {
 } from "../../shared/http";
 import { requireFamilyMember } from "../../shared/family-access";
 import { requireFeatureEntitlement } from "../../shared/entitlements";
+import { ChimeMediaProvider } from "./media-provider";
 
-const awsRegion = process.env.AWS_REGION;
-const chimeRegion = process.env.CHIME_CONTROL_REGION ?? awsRegion;
-const mediaRegion = process.env.CHIME_MEDIA_REGION ?? awsRegion;
+const mediaRegion = process.env.CHIME_MEDIA_REGION ?? process.env.AWS_REGION;
 const bucketName = process.env.RECORDINGS_BUCKET_NAME;
-const meetings = new ChimeSDKMeetingsClient({ region: chimeRegion });
-const pipelines = new ChimeSDKMediaPipelinesClient({ region: chimeRegion });
-const s3 = new S3Client({ region: awsRegion });
+const mediaProvider = new ChimeMediaProvider();
 
 const inviteSchema = z.object({
   inviteeId: z.string().min(1).max(128),
@@ -273,14 +250,7 @@ async function ensureMeeting(call: Record<string, unknown>) {
     throw new HttpError(503, "media_unavailable", "Call media is not configured.");
   }
   try {
-    const result = await meetings.send(new CreateMeetingCommand({
-      ClientRequestToken: String(call.callId),
-      ExternalMeetingId: String(call.callId),
-      MediaRegion: mediaRegion,
-      MeetingHostId: String(call.callerId),
-    }));
-    const meeting = result.Meeting;
-    if (!meeting?.MeetingId || !meeting.MeetingArn) throw new Error("Meeting response omitted its identity");
+    const meeting = await mediaProvider.createMeeting(String(call.callId), String(call.callerId), mediaRegion);
     await documentClient.send(new UpdateCommand({
       TableName: getTableName(),
       Key: getCallKey(String(call.familyId), String(call.callId)),
@@ -288,14 +258,14 @@ async function ensureMeeting(call: Record<string, unknown>) {
       ConditionExpression: "#status IN (:accepted, :active)",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
-        ":meetingId": meeting.MeetingId,
-        ":meetingArn": meeting.MeetingArn,
+        ":meetingId": meeting.meetingId,
+        ":meetingArn": meeting.meetingArn,
         ":updatedAt": new Date().toISOString(),
         ":accepted": "accepted",
         ":active": "active",
       },
     }));
-    return { ...call, meetingId: meeting.MeetingId, meetingArn: meeting.MeetingArn };
+    return { ...call, meetingId: meeting.meetingId, meetingArn: meeting.meetingArn };
   } catch (error) {
     const errorName = error instanceof Error ? error.name : "UnknownError";
     console.error(JSON.stringify({ event: "call_meeting_create_failed", errorName }));
@@ -392,36 +362,21 @@ async function ensureCapturePipeline(call: Record<string, unknown>) {
     throw new HttpError(503, "recording_unavailable", "Call recording is not configured.");
   }
   try {
-    const result = await pipelines.send(new CreateMediaCapturePipelineCommand({
-      ClientRequestToken: opaqueId(`capture:${call.callId}`),
-      SourceType: "ChimeSdkMeeting",
-      SourceArn: String(call.meetingArn),
-      SinkType: "S3Bucket",
-      SinkArn: `arn:aws:s3:::${bucketName}`,
-      ChimeSdkMeetingConfiguration: {
-        ArtifactsConfiguration: {
-          Audio: { MuxType: "AudioOnly" },
-          Video: { State: "Enabled", MuxType: "VideoOnly" },
-          Content: { State: "Disabled" },
-        },
-      },
-    }));
-    const capture = result.MediaCapturePipeline;
-    if (!capture?.MediaPipelineArn || !capture.MediaPipelineId) throw new Error("Capture response omitted pipeline identity");
+    const capture = await mediaProvider.startCapture(String(call.meetingArn), String(call.callId), bucketName);
     await documentClient.send(new UpdateCommand({
       TableName: getTableName(),
       Key: getCallKey(String(call.familyId), String(call.callId)),
       UpdateExpression: "SET capturePipelineArn = :pipelineArn, capturePipelineId = :pipelineId, recordingStatus = :status, updatedAt = :updatedAt",
       ConditionExpression: "recordingRequested = :yes AND callerRecordingConsent = :yes AND inviteeRecordingConsent = :yes",
       ExpressionAttributeValues: {
-        ":pipelineArn": capture.MediaPipelineArn,
-        ":pipelineId": capture.MediaPipelineId,
+        ":pipelineArn": capture.pipelineArn,
+        ":pipelineId": capture.pipelineId,
         ":status": "recording",
         ":yes": true,
         ":updatedAt": new Date().toISOString(),
       },
     }));
-    return { ...call, capturePipelineArn: capture.MediaPipelineArn, capturePipelineId: capture.MediaPipelineId, recordingStatus: "recording" };
+    return { ...call, capturePipelineArn: capture.pipelineArn, capturePipelineId: capture.pipelineId, recordingStatus: "recording" };
   } catch (error) {
     const errorName = error instanceof Error ? error.name : "UnknownError";
     console.error(JSON.stringify({ event: "call_recording_start_failed", errorName }));
@@ -454,12 +409,7 @@ async function getSession(event: APIGatewayProxyEvent) {
     let attendeeId = storedAttendee.Item?.attendeeId as string | undefined;
     if (!attendeeId) {
       const externalUserId = opaqueId(`attendee:${callId}:${user.userId}`);
-      const created = await meetings.send(new CreateAttendeeCommand({
-        MeetingId: String(call.meetingId),
-        ExternalUserId: externalUserId,
-      }));
-      attendeeId = created.Attendee?.AttendeeId;
-      if (!attendeeId) throw new Error("Attendee response omitted its identity");
+      attendeeId = await mediaProvider.createAttendee(String(call.meetingId), externalUserId);
       const attendeeCreatedAt = new Date().toISOString();
       try {
         await documentClient.send(new PutCommand({
@@ -498,15 +448,11 @@ async function getSession(event: APIGatewayProxyEvent) {
 
     let currentCall: Record<string, unknown> = { ...call, status: "active" };
     currentCall = await ensureCapturePipeline(currentCall);
-    const tokenResult = await meetings.send(new GetAttendeeCommand({
-      MeetingId: String(call.meetingId),
-      AttendeeId: attendeeId,
-    }));
-    if (!tokenResult.Attendee?.JoinToken) throw new Error("Attendee response omitted its join token");
+    const joinToken = await mediaProvider.getJoinToken(String(call.meetingId), attendeeId);
     return jsonResponse(200, {
       callId,
       meeting: { meetingId: call.meetingId, mediaRegion },
-      attendee: { attendeeId, joinToken: tokenResult.Attendee.JoinToken },
+      attendee: { attendeeId, joinToken },
       recording: { status: currentCall.recordingStatus },
     });
   } catch (error) {
@@ -530,43 +476,23 @@ async function endCall(event: APIGatewayProxyEvent) {
   }
   if (call.meetingId) {
     try {
-      await meetings.send(new DeleteMeetingCommand({ MeetingId: String(call.meetingId) }));
+      await mediaProvider.endMeeting(String(call.meetingId));
     } catch (error) {
-      if (!(error instanceof Error) || error.name !== "NotFoundException") throw error;
+      throw error;
     }
   }
 
   let concatenationPipelineId: string | undefined;
   if (typeof call.capturePipelineArn === "string") {
     try {
-      await pipelines.send(new DeleteMediaCapturePipelineCommand({ MediaPipelineId: String(call.capturePipelineId) }));
-      const result = await pipelines.send(new CreateMediaConcatenationPipelineCommand({
-        ClientRequestToken: opaqueId(`concat:${call.callId}`),
-        Sources: [{
-          Type: "MediaCapturePipeline",
-          MediaCapturePipelineSourceConfiguration: {
-            MediaPipelineArn: String(call.capturePipelineArn),
-            ChimeSdkMeetingConfiguration: {
-              ArtifactsConfiguration: {
-                Audio: { State: "Enabled" },
-                Video: { State: "Enabled" },
-                Content: { State: "Disabled" },
-                DataChannel: { State: "Disabled" },
-                TranscriptionMessages: { State: "Disabled" },
-                MeetingEvents: { State: "Disabled" },
-                CompositedVideo: { State: "Disabled" },
-              },
-            },
-          },
-        }],
-        Sinks: [{
-          Type: "S3Bucket",
-          S3BucketSinkConfiguration: {
-            Destination: `arn:aws:s3:::${bucketName}/${familyId}/${callId}/recording`,
-          },
-        }],
-      }));
-      concatenationPipelineId = result.MediaConcatenationPipeline?.MediaPipelineId;
+      if (!bucketName) throw new Error("Recording storage is not configured");
+      concatenationPipelineId = await mediaProvider.stopCaptureAndConcatenate(
+        String(call.capturePipelineId),
+        String(call.capturePipelineArn),
+        familyId,
+        callId,
+        bucketName,
+      );
     } catch (error) {
       const errorName = error instanceof Error ? error.name : "UnknownError";
       console.error(JSON.stringify({ event: "call_recording_finalize_failed", errorName }));
@@ -622,15 +548,13 @@ async function getRecording(event: APIGatewayProxyEvent) {
     return jsonResponse(200, { recording: { status: call.recordingStatus } });
   }
   try {
-    const pipeline = await pipelines.send(new GetMediaPipelineCommand({ MediaPipelineId: String(call.concatenationPipelineId) }));
-    const status = pipeline.MediaPipeline?.MediaConcatenationPipeline?.Status;
+    const status = await mediaProvider.getConcatenationStatus(String(call.concatenationPipelineId));
     if (status !== "Stopped") return jsonResponse(200, { recording: { status: "processing" } });
 
     const prefix = `${familyId}/${callId}/recording/video/`;
-    const objects = await s3.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: prefix }));
-    const recording = objects.Contents?.find((object) => object.Key?.endsWith(".mp4"));
-    if (!recording?.Key) return jsonResponse(200, { recording: { status: "processing" } });
-    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucketName, Key: recording.Key }), { expiresIn: 300 });
+    if (!bucketName) throw new Error("Recording storage is not configured");
+    const url = await mediaProvider.getRecordingUrl(bucketName, prefix);
+    if (!url) return jsonResponse(200, { recording: { status: "processing" } });
     return jsonResponse(200, {
       recording: { status: "available", url, expiresInSeconds: 300 },
     });
