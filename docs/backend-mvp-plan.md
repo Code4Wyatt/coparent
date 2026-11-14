@@ -14,9 +14,7 @@ invitee accepts. Recordings go to private S3 storage. DynamoDB Streams drive
 asynchronous notifications and other follow-up work.
 ```
 
-The DynamoDB table is the primary application store. MongoDB is not a latency
-layer in this design; consider DAX only if measured read patterns justify a
-cache. Feature entitlements are checked in the backend for every paid feature.
+The DynamoDB table is the primary application store. Feature entitlements are checked in the backend for every paid feature.
 
 ## Delivery stages
 
@@ -65,10 +63,13 @@ message.
 
 ### 4. Shared calendar and proposed amendments
 
-- Add schedule/event reads by date range and endpoints for creating and editing
-  agreed plans.
+- Add schedule/event reads by date range and endpoints for creating agreed
+  events.
 - Add proposed amendment creation, accept, decline, and withdrawal flows with
   an immutable response history.
+- Support proposals to add, change, or cancel a calendar event; accepting a
+  proposal and writing the resulting event revision are one DynamoDB
+  transaction.
 - Store instants in UTC with the relevant IANA time zone for display and
   recurring-plan interpretation.
 - Return a calendar view that distinguishes the agreed plan from pending

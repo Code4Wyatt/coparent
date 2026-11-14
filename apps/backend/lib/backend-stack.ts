@@ -75,6 +75,12 @@ export class BackendStack extends Stack {
       sortKey: { name: "GSI1SK", type: AttributeType.STRING },
       projectionType: ProjectionType.ALL,
     });
+    dataTable.addGlobalSecondaryIndex({
+      indexName: "GSI2",
+      partitionKey: { name: "GSI2PK", type: AttributeType.STRING },
+      sortKey: { name: "GSI2SK", type: AttributeType.STRING },
+      projectionType: ProjectionType.ALL,
+    });
 
     const apiAccessLogs = new LogGroup(this, "ApiAccessLogs", {
       retention: RetentionDays.ONE_MONTH,
@@ -185,6 +191,33 @@ export class BackendStack extends Stack {
     const message = messages.addResource("{messageId}");
     message.addResource("read").addMethod("POST", messageIntegration, familyAuthorizer);
     message.addResource("reports").addMethod("POST", messageIntegration, familyAuthorizer);
+
+    const calendarHandler = new NodejsFunction(this, "CalendarHandler", {
+      entry: join(__dirname, "../src/features/calendar/handler.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(10),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: { DATA_TABLE_NAME: dataTable.tableName },
+    });
+    dataTable.grantReadWriteData(calendarHandler);
+
+    const calendarIntegration = new LambdaIntegration(calendarHandler);
+    const calendar = familyId.addResource("calendar");
+    calendar.addMethod("GET", calendarIntegration, familyAuthorizer);
+    const events = calendar.addResource("events");
+    events.addMethod("POST", calendarIntegration, familyAuthorizer);
+    events.addResource("{eventId}").addResource("history").addMethod("GET", calendarIntegration, familyAuthorizer);
+    const proposals = calendar.addResource("proposals");
+    proposals.addMethod("POST", calendarIntegration, familyAuthorizer);
+    const proposal = proposals.addResource("{proposalId}");
+    proposal.addMethod("DELETE", calendarIntegration, familyAuthorizer);
+    proposal.addResource("respond").addMethod(
+      "POST",
+      calendarIntegration,
+      familyAuthorizer,
+    );
 
     new CfnOutput(this, "ApiUrl", {
       value: api.url,
