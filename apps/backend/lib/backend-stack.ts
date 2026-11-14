@@ -130,6 +130,34 @@ export class BackendStack extends Stack {
       authorizationType: AuthorizationType.COGNITO,
     });
 
+    const familyHandler = new NodejsFunction(this, "FamilyHandler", {
+      entry: join(__dirname, "../src/features/families/handler.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(10),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: { DATA_TABLE_NAME: dataTable.tableName },
+    });
+    dataTable.grantReadWriteData(familyHandler);
+
+    const familyAuthorizer = { authorizer, authorizationType: AuthorizationType.COGNITO };
+    const families = api.root.addResource("families");
+    const familyIntegration = new LambdaIntegration(familyHandler);
+    families.addMethod("POST", familyIntegration, familyAuthorizer);
+    families.addMethod("GET", familyIntegration, familyAuthorizer);
+
+    const familyId = families.addResource("{familyId}");
+    const invitations = familyId.addResource("invitations");
+    invitations.addMethod("POST", familyIntegration, familyAuthorizer);
+    invitations.addMethod("GET", familyIntegration, familyAuthorizer);
+    invitations.addResource("{invitationId}").addMethod("DELETE", familyIntegration, familyAuthorizer);
+    api.root.addResource("invitations").addResource("accept").addMethod(
+      "POST",
+      familyIntegration,
+      familyAuthorizer,
+    );
+
     new CfnOutput(this, "ApiUrl", {
       value: api.url,
       description: "Base URL for the Coparent REST API",
