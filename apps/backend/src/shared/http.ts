@@ -27,6 +27,23 @@ export function jsonResponse(statusCode: number, body: unknown): APIGatewayProxy
   };
 }
 
+export function publicRecord<T extends Record<string, unknown>>(record: T): Omit<T,
+  "PK" | "SK" | "GSI1PK" | "GSI1SK" | "GSI2PK" | "GSI2SK" | "entityType" | "requestHash" | "tokenHash"> {
+  const {
+    PK: _PK,
+    SK: _SK,
+    GSI1PK: _GSI1PK,
+    GSI1SK: _GSI1SK,
+    GSI2PK: _GSI2PK,
+    GSI2SK: _GSI2SK,
+    entityType: _entityType,
+    requestHash: _requestHash,
+    tokenHash: _tokenHash,
+    ...result
+  } = record;
+  return result;
+}
+
 export function parseBody<T>(event: APIGatewayProxyEvent, schema: ZodType<T>): T {
   if (!event.body) throw new HttpError(400, "invalid_request", "A JSON request body is required.");
 

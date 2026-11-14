@@ -15,6 +15,7 @@ import {
   HttpError,
   jsonResponse,
   parseBody,
+  publicRecord,
 } from "../../shared/http";
 import { requireFamilyMember } from "../../shared/family-access";
 
@@ -214,14 +215,14 @@ async function sendMessage(event: Parameters<Parameters<typeof createHandler>[0]
         ConsistentRead: true,
       }));
       if (previous.Item?.authorId === user.userId && previous.Item?.requestHash === requestHash) {
-        return jsonResponse(200, { message: previous.Item, replayed: true });
+        return jsonResponse(200, { message: publicRecord(previous.Item), replayed: true });
       }
       throw new HttpError(409, "idempotency_conflict", "This idempotency key was already used for a different request.");
     }
     throw error;
   }
 
-  return jsonResponse(201, { message: messageItem });
+  return jsonResponse(201, { message: publicRecord(messageItem) });
 }
 
 async function listMessages(event: Parameters<Parameters<typeof createHandler>[0]>[0]) {
@@ -243,7 +244,7 @@ async function listMessages(event: Parameters<Parameters<typeof createHandler>[0
     ScanIndexForward: false,
   }));
 
-  const messages = (result.Items ?? []).map(({ requestHash: _requestHash, ...message }) => message);
+  const messages = (result.Items ?? []).map((message) => publicRecord(message));
   return jsonResponse(200, { messages, nextCursor: encodeCursor(result.LastEvaluatedKey) });
 }
 
