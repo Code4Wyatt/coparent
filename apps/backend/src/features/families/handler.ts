@@ -109,6 +109,22 @@ async function createFamily(event: Parameters<Parameters<typeof createHandler>[0
           ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
         },
       },
+      {
+        Put: {
+          TableName: tableName,
+          Item: {
+            PK: `FAMILY#${familyId}`,
+            SK: "ENTITLEMENTS",
+            entityType: "FAMILY_ENTITLEMENTS",
+            familyId,
+            plan: "basic",
+            enabledFeatures: [],
+            version: 1,
+            updatedAt: now,
+          },
+          ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+        },
+      },
       auditPut(familyId, user.userId, "FAMILY_CREATED", now),
     ],
   }));
