@@ -2,17 +2,22 @@ import { join } from "node:path";
 import {
   CfnOutput,
   Duration,
+  RemovalPolicy,
   Stack,
   StackProps,
 } from "aws-cdk-lib";
 import { Runtime } from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import {
+  CognitoUserPoolsAuthorizer,
   AccessLogFormat,
+  AuthorizationType,
   LambdaIntegration,
   LogGroupLogDestination,
   RestApi,
 } from "aws-cdk-lib/aws-apigateway";
+import { AttributeType, BillingMode, ProjectionType, StreamViewType, Table } from "aws-cdk-lib/aws-dynamodb";
+import { UserPool, UserPoolClient, VerificationEmailStyle } from "aws-cdk-lib/aws-cognito";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 
@@ -23,6 +28,52 @@ interface BackendStackProps extends StackProps {
 export class BackendStack extends Stack {
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
+
+    const userPool = new UserPool(this, "UserPool", {
+      userPoolName: `coparent-users-${props.stage}`,
+      selfSignUpEnabled: true,
+      signInAliases: { email: true },
+      signInCaseSensitive: false,
+      autoVerify: { email: true },
+      userVerification: {
+        emailSubject: "Verify your Coparent account",
+        emailBody: "Enter this verification code in Coparent: {####}",
+        emailStyle: VerificationEmailStyle.CODE,
+      },
+      passwordPolicy: {
+        minLength: 12,
+        requireDigits: true,
+        requireLowercase: true,
+        requireUppercase: true,
+        requireSymbols: true,
+      },
+    });
+
+    const userPoolClient = new UserPoolClient(this, "UserPoolClient", {
+      userPool,
+      userPoolClientName: `coparent-client-${props.stage}`,
+      authFlows: { userSrp: true },
+      disableOAuth: true,
+      enableTokenRevocation: true,
+      preventUserExistenceErrors: true,
+    });
+
+    const dataTable = new Table(this, "AppData", {
+      partitionKey: { name: "PK", type: AttributeType.STRING },
+      sortKey: { name: "SK", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "expiresAt",
+      stream: StreamViewType.NEW_AND_OLD_IMAGES,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    dataTable.addGlobalSecondaryIndex({
+      indexName: "GSI1",
+      partitionKey: { name: "GSI1PK", type: AttributeType.STRING },
+      sortKey: { name: "GSI1SK", type: AttributeType.STRING },
+      projectionType: ProjectionType.ALL,
+    });
 
     const apiAccessLogs = new LogGroup(this, "ApiAccessLogs", {
       retention: RetentionDays.ONE_MONTH,
@@ -45,6 +96,11 @@ export class BackendStack extends Stack {
       },
     });
 
+    const authorizer = new CognitoUserPoolsAuthorizer(this, "ApiAuthorizer", {
+      cognitoUserPools: [userPool],
+      authorizerName: `coparent-authorizer-${props.stage}`,
+    });
+
     const healthHandler = new NodejsFunction(this, "HealthHandler", {
       entry: join(__dirname, "../src/functions/health.ts"),
       handler: "handler",
@@ -60,9 +116,27 @@ export class BackendStack extends Stack {
 
     api.root.addResource("health").addMethod("GET", new LambdaIntegration(healthHandler));
 
+    const identityHandler = new NodejsFunction(this, "IdentityHandler", {
+      entry: join(__dirname, "../src/functions/me.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 256,
+      timeout: Duration.seconds(5),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+    });
+
+    api.root.addResource("me").addMethod("GET", new LambdaIntegration(identityHandler), {
+      authorizer,
+      authorizationType: AuthorizationType.COGNITO,
+    });
+
     new CfnOutput(this, "ApiUrl", {
       value: api.url,
       description: "Base URL for the Coparent REST API",
     });
+
+    new CfnOutput(this, "UserPoolId", { value: userPool.userPoolId });
+    new CfnOutput(this, "UserPoolClientId", { value: userPoolClient.userPoolClientId });
+    new CfnOutput(this, "DataTableName", { value: dataTable.tableName });
   }
 }
