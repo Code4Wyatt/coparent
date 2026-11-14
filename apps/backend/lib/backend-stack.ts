@@ -18,6 +18,7 @@ import {
 } from "aws-cdk-lib/aws-apigateway";
 import { AttributeType, BillingMode, ProjectionType, StreamViewType, Table } from "aws-cdk-lib/aws-dynamodb";
 import { UserPool, UserPoolClient, VerificationEmailStyle } from "aws-cdk-lib/aws-cognito";
+import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 
@@ -157,6 +158,33 @@ export class BackendStack extends Stack {
       familyIntegration,
       familyAuthorizer,
     );
+
+    const messageHandler = new NodejsFunction(this, "MessageHandler", {
+      entry: join(__dirname, "../src/features/messages/handler.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(10),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: {
+        DATA_TABLE_NAME: dataTable.tableName,
+        MODERATION_BLOCK_THRESHOLD: "0.85",
+        MODERATION_POLICY_VERSION: "v1",
+      },
+    });
+    dataTable.grantReadWriteData(messageHandler);
+    messageHandler.addToRolePolicy(new PolicyStatement({
+      actions: ["comprehend:DetectToxicContent"],
+      resources: ["*"],
+    }));
+
+    const messageIntegration = new LambdaIntegration(messageHandler);
+    const messages = familyId.addResource("messages");
+    messages.addMethod("POST", messageIntegration, familyAuthorizer);
+    messages.addMethod("GET", messageIntegration, familyAuthorizer);
+    const message = messages.addResource("{messageId}");
+    message.addResource("read").addMethod("POST", messageIntegration, familyAuthorizer);
+    message.addResource("reports").addMethod("POST", messageIntegration, familyAuthorizer);
 
     new CfnOutput(this, "ApiUrl", {
       value: api.url,

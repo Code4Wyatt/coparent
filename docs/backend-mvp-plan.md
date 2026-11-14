@@ -51,8 +51,10 @@ user cannot read or change another family's records.
 ### 3. Moderated messaging
 
 - Add send, paginated history, read state, and message report endpoints.
-- Run message text through a moderation-provider adapter before accepting it;
-  persist moderation outcome and policy version with the message.
+- Run message text through an Amazon Comprehend toxicity adapter before
+  accepting it; persist moderation outcome and policy version with the message.
+- Configure the block threshold per deployment. The initial Comprehend toxicity
+  integration supports English only; unsupported languages fail closed.
 - Return an explicit blocked/review/accepted outcome; keep provider credentials
   and provider-specific response formats inside the adapter.
 - Publish a message-created event for push delivery after the write succeeds.
