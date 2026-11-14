@@ -59,6 +59,29 @@ function auditPut(familyId: string, actorId: string, action: string, createdAt: 
   };
 }
 
+async function recordProviderFailure(familyId: string, callId: string, action: string, errorName: string) {
+  const createdAt = new Date().toISOString();
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: getTableName(),
+      Item: {
+        PK: `FAMILY#${familyId}`,
+        SK: `AUDIT#${createdAt}#${randomUUID()}`,
+        entityType: "AUDIT_EVENT",
+        familyId,
+        actorId: "system",
+        action,
+        createdAt,
+        details: { callId, provider: "amazon-chime", errorName },
+      },
+      ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+    }));
+  } catch (auditError) {
+    const auditErrorName = auditError instanceof Error ? auditError.name : "UnknownError";
+    console.error(JSON.stringify({ event: "provider_failure_audit_failed", callId, errorName: auditErrorName }));
+  }
+}
+
 async function getCall(familyId: string, callId: string) {
   const result = await documentClient.send(new GetCommand({
     TableName: getTableName(),
@@ -269,6 +292,7 @@ async function ensureMeeting(call: Record<string, unknown>) {
   } catch (error) {
     const errorName = error instanceof Error ? error.name : "UnknownError";
     console.error(JSON.stringify({ event: "call_meeting_create_failed", errorName }));
+    await recordProviderFailure(String(call.familyId), String(call.callId), "CALL_MEETING_CREATE_FAILED", errorName);
     throw new HttpError(503, "media_unavailable", "The call session could not be prepared. Please try again.");
   }
 }
@@ -292,14 +316,25 @@ async function respondToCall(event: APIGatewayProxyEvent) {
   }
   if (Date.parse(String(call.expiresAt)) <= Date.now()) {
     const expiredAt = new Date().toISOString();
-    await documentClient.send(new UpdateCommand({
-      TableName: getTableName(),
-      Key: getCallKey(familyId, callId),
-      UpdateExpression: "SET #status = :expired, updatedAt = :updatedAt",
-      ConditionExpression: "#status = :invited",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":expired": "expired", ":invited": "invited", ":updatedAt": expiredAt },
-    }));
+    try {
+      await documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: getTableName(),
+              Key: getCallKey(familyId, callId),
+              UpdateExpression: "SET #status = :expired, updatedAt = :updatedAt",
+              ConditionExpression: "#status = :invited AND expiresAt <= :updatedAt",
+              ExpressionAttributeNames: { "#status": "status" },
+              ExpressionAttributeValues: { ":expired": "expired", ":invited": "invited", ":updatedAt": expiredAt },
+            },
+          },
+          auditPut(familyId, user.userId, "CALL_INVITATION_EXPIRED", expiredAt, callId),
+        ],
+      }));
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "TransactionCanceledException") throw error;
+    }
     throw new HttpError(409, "call_invitation_expired", "This call invitation has expired.");
   }
 
@@ -380,6 +415,7 @@ async function ensureCapturePipeline(call: Record<string, unknown>) {
   } catch (error) {
     const errorName = error instanceof Error ? error.name : "UnknownError";
     console.error(JSON.stringify({ event: "call_recording_start_failed", errorName }));
+    await recordProviderFailure(String(call.familyId), String(call.callId), "CALL_RECORDING_START_FAILED", errorName);
     throw new HttpError(503, "recording_unavailable", "Recording could not be started. Please try again.");
   }
 }
@@ -459,6 +495,7 @@ async function getSession(event: APIGatewayProxyEvent) {
     if (error instanceof HttpError) throw error;
     const errorName = error instanceof Error ? error.name : "UnknownError";
     console.error(JSON.stringify({ event: "call_session_create_failed", errorName }));
+    await recordProviderFailure(familyId, callId, "CALL_SESSION_CREATE_FAILED", errorName);
     throw new HttpError(503, "media_unavailable", "The call session could not be prepared. Please try again.");
   }
 }
@@ -474,10 +511,18 @@ async function endCall(event: APIGatewayProxyEvent) {
   if (["ended", "declined", "expired", "cancelled"].includes(String(call.status))) {
     return jsonResponse(200, { call: publicCall(call), replayed: true });
   }
+  if (call.status === "invited") {
+    throw new HttpError(409, "call_not_accepted", "Cancel the pending invitation or wait for the invitee to respond.");
+  }
+  if (call.status !== "accepted" && call.status !== "active") {
+    throw new HttpError(409, "call_not_active", "This call cannot be ended in its current state.");
+  }
   if (call.meetingId) {
     try {
       await mediaProvider.endMeeting(String(call.meetingId));
     } catch (error) {
+      const errorName = error instanceof Error ? error.name : "UnknownError";
+      await recordProviderFailure(familyId, callId, "CALL_MEETING_END_FAILED", errorName);
       throw error;
     }
   }
@@ -496,6 +541,7 @@ async function endCall(event: APIGatewayProxyEvent) {
     } catch (error) {
       const errorName = error instanceof Error ? error.name : "UnknownError";
       console.error(JSON.stringify({ event: "call_recording_finalize_failed", errorName }));
+      await recordProviderFailure(familyId, callId, "CALL_RECORDING_FINALIZATION_FAILED", errorName);
     }
   }
 
