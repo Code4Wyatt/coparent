@@ -85,12 +85,14 @@ visibly separate until accepted.
 - Add invite, accept, decline, cancel, expire, and session retrieval endpoints.
 - Persist invitation state before notifying the other parent. Do not create a
   media session or return join credentials until acceptance.
+- Write a durable call-invitation notification outbox record in the same
+  DynamoDB transaction as the invitation. Push delivery is wired in stage 7.
 - Put the real-time media integration behind a provider interface. The first
   AWS implementation can use Amazon Chime SDK meetings; keep meeting media out
   of API Gateway and Lambda.
 - Gate call recording by entitlement and per-call consent. Store recordings in
   a private S3 bucket, keep metadata and lifecycle state in DynamoDB, and apply
-  a configured retention policy.
+  a configured retention policy. Both parents must consent before capture starts.
 - Make session creation and recording start idempotent; record provider events
   for failed or ended sessions.
 
@@ -102,6 +104,8 @@ consent, and retention are auditable.
 
 - Define a server-side entitlement model for included and opt-in features.
 - Enforce entitlement checks in each paid feature handler, not only in clients.
+- Start each new family on a basic plan; opt-in features are disabled unless
+  the family entitlement record enables them.
 - Add an idempotent billing-event ingestion boundary that updates entitlements.
 - Keep the payment provider behind an adapter until web, Apple, and Google
   billing requirements and the initial price catalog are selected.

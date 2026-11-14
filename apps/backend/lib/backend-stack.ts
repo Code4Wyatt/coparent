@@ -18,8 +18,9 @@ import {
 } from "aws-cdk-lib/aws-apigateway";
 import { AttributeType, BillingMode, ProjectionType, StreamViewType, Table } from "aws-cdk-lib/aws-dynamodb";
 import { UserPool, UserPoolClient, VerificationEmailStyle } from "aws-cdk-lib/aws-cognito";
-import { PolicyStatement } from "aws-cdk-lib/aws-iam";
+import { CfnServiceLinkedRole, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 
 interface BackendStackProps extends StackProps {
@@ -218,6 +219,65 @@ export class BackendStack extends Stack {
       calendarIntegration,
       familyAuthorizer,
     );
+
+    const recordingsBucket = new Bucket(this, "CallRecordings", {
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      encryption: BucketEncryption.S3_MANAGED,
+      objectOwnership: ObjectOwnership.BUCKET_OWNER_PREFERRED,
+      enforceSSL: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    recordingsBucket.addToResourcePolicy(new PolicyStatement({
+      actions: ["s3:PutObject", "s3:PutObjectAcl", "s3:GetObject", "s3:ListBucket"],
+      principals: [new ServicePrincipal("mediapipelines.chime.amazonaws.com")],
+      resources: [recordingsBucket.bucketArn, recordingsBucket.arnForObjects("*")],
+      conditions: {
+        StringEquals: { "aws:SourceAccount": this.account },
+        ArnLike: { "aws:SourceArn": `arn:${this.partition}:chime:*:${this.account}:*` },
+      },
+    }));
+    new CfnServiceLinkedRole(this, "ChimeMediaPipelinesServiceLinkedRole", {
+      awsServiceName: "mediapipelines.chime.amazonaws.com",
+    });
+
+    const callHandler = new NodejsFunction(this, "CallHandler", {
+      entry: join(__dirname, "../src/features/calls/handler.ts"),
+      handler: "handler",
+      runtime: Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: Duration.seconds(20),
+      bundling: { target: "node22", minify: true, sourceMap: true },
+      environment: {
+        DATA_TABLE_NAME: dataTable.tableName,
+        RECORDINGS_BUCKET_NAME: recordingsBucket.bucketName,
+        CHIME_MEDIA_REGION: this.region,
+      },
+    });
+    dataTable.grantReadWriteData(callHandler);
+    recordingsBucket.grantRead(callHandler);
+    callHandler.addToRolePolicy(new PolicyStatement({
+      actions: [
+        "chime:CreateMeeting", "chime:CreateAttendee", "chime:GetAttendee", "chime:DeleteMeeting",
+        "chime:CreateMediaCapturePipeline", "chime:DeleteMediaCapturePipeline",
+        "chime:CreateMediaConcatenationPipeline", "chime:GetMediaPipeline",
+      ],
+      resources: ["*"],
+    }));
+    callHandler.addToRolePolicy(new PolicyStatement({
+      actions: ["s3:GetBucketPolicy"],
+      resources: [recordingsBucket.bucketArn],
+    }));
+
+    const callIntegration = new LambdaIntegration(callHandler);
+    const calls = familyId.addResource("calls");
+    calls.addMethod("POST", callIntegration, familyAuthorizer);
+    calls.addMethod("GET", callIntegration, familyAuthorizer);
+    const call = calls.addResource("{callId}");
+    call.addResource("cancel").addMethod("POST", callIntegration, familyAuthorizer);
+    call.addResource("respond").addMethod("POST", callIntegration, familyAuthorizer);
+    call.addResource("session").addMethod("GET", callIntegration, familyAuthorizer);
+    call.addResource("end").addMethod("POST", callIntegration, familyAuthorizer);
+    call.addResource("recording").addMethod("GET", callIntegration, familyAuthorizer);
 
     new CfnOutput(this, "ApiUrl", {
       value: api.url,
