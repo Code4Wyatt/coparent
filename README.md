@@ -26,6 +26,10 @@ Entitlement changes use a normalized SQS event contract with per-family revision
 - pnpm 11
 - AWS CDK credentials and a bootstrapped AWS environment to deploy
 
+Copy `.env.example` to `.env` and set the AWS profile, account ID, and region
+before deploying. The shell does not load `.env` automatically; export its
+values in your terminal before running a deploy command.
+
 ## Commands
 
 From the repository root:
